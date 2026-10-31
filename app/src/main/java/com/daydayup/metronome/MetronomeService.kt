@@ -61,9 +61,9 @@ class MetronomeService : Service() {
             NotificationChannel(channel, "节拍器运行", NotificationManager.IMPORTANCE_LOW))
         thread = HandlerThread("daydayup-clicks").also { it.start() }
         handler = Handler(thread.looper)
-        pool = SoundPool.Builder().setMaxStreams(1).setAudioAttributes(
-            AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()).build()
+        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+        pool = SoundPool.Builder().setMaxStreams(1).setAudioAttributes(attributes).build()
         clickId = pool.load(this, R.raw.click, 1)
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "daydayup:metronome")
     }
