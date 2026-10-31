@@ -56,6 +56,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = SessionStore(this)
+        val audioSettings = getSharedPreferences("metronome_audio", MODE_PRIVATE)
+        MetronomeRuntime.volume = audioSettings.getFloat("click_volume", 1f).coerceIn(0f, 1f)
+        MetronomeRuntime.soundEnabled = audioSettings.getBoolean("click_enabled", true)
         if (MetronomeRuntime.phase == "idle") store.recoverInterrupted()
         setContent {
             var page by remember { mutableStateOf("首页") }
@@ -80,10 +83,16 @@ class MainActivity : ComponentActivity() {
                                     ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                                     MetronomeService.send(this@MainActivity, action, bpm)
                                 },
-                                sendVolume = { value -> startService(Intent(this@MainActivity, MetronomeService::class.java)
-                                    .setAction(MetronomeService.SET_VOLUME).putExtra(MetronomeService.EXTRA_VOLUME, value)) },
-                                sendSound = { value -> startService(Intent(this@MainActivity, MetronomeService::class.java)
-                                    .setAction(MetronomeService.SET_SOUND).putExtra(MetronomeService.EXTRA_SOUND, value)) },
+                                sendVolume = { value ->
+                                    audioSettings.edit().putFloat("click_volume", value).apply()
+                                    if (MetronomeRuntime.phase != "idle") startService(Intent(this@MainActivity, MetronomeService::class.java)
+                                        .setAction(MetronomeService.SET_VOLUME).putExtra(MetronomeService.EXTRA_VOLUME, value))
+                                },
+                                sendSound = { value ->
+                                    audioSettings.edit().putBoolean("click_enabled", value).apply()
+                                    if (MetronomeRuntime.phase != "idle") startService(Intent(this@MainActivity, MetronomeService::class.java)
+                                        .setAction(MetronomeService.SET_SOUND).putExtra(MetronomeService.EXTRA_SOUND, value))
+                                },
                                 openRecords = { page = "记录" },
                                 demoActive = demo.phase !in listOf("notStarted", "done"),
                                 endDemo = { demo.phase = "done" },
@@ -213,11 +222,11 @@ fun MetronomeScreen(send: (String, Int?) -> Unit, sendVolume: (Float) -> Unit, s
         SectionCard {
             Text("提示音", fontWeight = FontWeight.SemiBold, color = Ink)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("播放提示音", Modifier.weight(1f)); Switch(MetronomeRuntime.soundEnabled, onCheckedChange = { MetronomeRuntime.soundEnabled = it; if (running) sendSound(it) })
+                Text("播放提示音", Modifier.weight(1f)); Switch(MetronomeRuntime.soundEnabled, onCheckedChange = { MetronomeRuntime.soundEnabled = it; sendSound(it) })
             }
-            Text("音量", color = Muted)
-            Slider(MetronomeRuntime.volume, onValueChange = { MetronomeRuntime.volume = it; if (running) sendVolume(it) })
-            Text("可与音乐、有声内容同时播放。第一版不含语音播报。", color = Muted, fontSize = 12.sp)
+            Text("节拍音量 ${Math.round(MetronomeRuntime.volume * 100)}%", color = Muted)
+            Slider(MetronomeRuntime.volume, onValueChange = { MetronomeRuntime.volume = it; sendVolume(it) })
+            Text("此滑杆只调节节拍声；手机媒体音量仍决定声音上限。第一版不含语音播报。", color = Muted, fontSize = 12.sp)
         }
         TextButton(onClick = openRecords) { Text("查看真实使用记录 →") }
     }
