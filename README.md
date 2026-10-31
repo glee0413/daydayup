@@ -34,7 +34,7 @@
 
 ## 构建与运行
 
-使用 Android Studio 打开仓库根目录，并配置 JDK 17 与 Android SDK 35。Windows 命令行：
+使用 Android Studio 打开仓库根目录，并配置 Android SDK 35。项目以 Java 17 字节码编译；本机 Android Studio 自带的 JBR 21 已验证可用于构建。Windows 命令行：
 
 ```powershell
 .\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
