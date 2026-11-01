@@ -7,16 +7,14 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
 import android.media.AudioManager
-import android.media.SoundPool
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import com.daydayup.MainActivity
-import com.daydayup.R
 
 class MetronomeService : Service() {
     companion object {
@@ -43,12 +41,10 @@ class MetronomeService : Service() {
     private lateinit var store: SessionStore
     private lateinit var thread: HandlerThread
     private lateinit var handler: Handler
-    private lateinit var pool: SoundPool
+    private var audio: StreamingMetronome? = null
     private lateinit var wakeLock: PowerManager.WakeLock
     private val stateLock = Any()
-    private var clickId = 0
     private var session: MetronomeSession? = null
-    private var nextBeatNs = 0L
     private var wallStartedAt = 0L
     private var lastCheckpointMs = 0L
 
@@ -59,12 +55,8 @@ class MetronomeService : Service() {
         store = SessionStore(this)
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
             NotificationChannel(channel, "节拍器运行", NotificationManager.IMPORTANCE_LOW))
-        thread = HandlerThread("daydayup-clicks").also { it.start() }
+        thread = HandlerThread("daydayup-session").also { it.start() }
         handler = Handler(thread.looper)
-        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
-        pool = SoundPool.Builder().setMaxStreams(1).setAudioAttributes(attributes).build()
-        clickId = pool.load(this, R.raw.click, 1)
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "daydayup:metronome")
     }
 
@@ -83,12 +75,13 @@ class MetronomeService : Service() {
                 MetronomeRuntime.phase = "running"
                 wakeLock.acquire()
                 startForeground(notificationId, notification())
-                nextBeatNs = SystemClock.elapsedRealtimeNanos()
-                handler.post(tick)
+                startAudio(bpm)
+                handler.post(heartbeat)
             }
             PAUSE -> session?.let {
                 it.pause(now)
-                handler.removeCallbacks(tick)
+                handler.removeCallbacks(heartbeat)
+                audio?.stop(); audio = null
                 if (wakeLock.isHeld) wakeLock.release()
                 checkpoint(now)
                 MetronomeRuntime.elapsedMs = it.elapsedMs(now)
@@ -99,30 +92,33 @@ class MetronomeService : Service() {
                 it.resume(now)
                 MetronomeRuntime.phase = "running"
                 if (!wakeLock.isHeld) wakeLock.acquire()
-                nextBeatNs = SystemClock.elapsedRealtimeNanos()
-                handler.removeCallbacks(tick)
-                handler.post(tick)
+                startAudio(it.bpm)
+                handler.removeCallbacks(heartbeat)
+                handler.post(heartbeat)
                 updateNotification()
             }
             SET_BPM -> session?.let {
                 val value = intent.getIntExtra(EXTRA_BPM, it.bpm)
                 if (it.changeBpm(value, now)) {
                     MetronomeRuntime.bpm = value
-                    nextBeatNs = SystemClock.elapsedRealtimeNanos() + 60_000_000_000L / value
-                    handler.removeCallbacks(tick)
-                    if (!it.paused) handler.postDelayed(tick, 60_000L / value)
+                    audio?.bpm = value
                     checkpoint(now)
                     updateNotification()
                 }
             }
-            SET_VOLUME -> MetronomeRuntime.volume = intent.getFloatExtra(EXTRA_VOLUME, MetronomeRuntime.volume).coerceIn(0f, 1f)
+            SET_VOLUME -> {
+                MetronomeRuntime.volume = intent.getFloatExtra(EXTRA_VOLUME, MetronomeRuntime.volume).coerceIn(0f, 1f)
+                audio?.volume = MetronomeRuntime.volume
+                refreshAudible()
+            }
             SET_SOUND -> {
                 MetronomeRuntime.soundEnabled = intent.getBooleanExtra(EXTRA_SOUND, MetronomeRuntime.soundEnabled)
-                MetronomeRuntime.audible = MetronomeRuntime.soundEnabled && MetronomeRuntime.volume > 0f
-                updateNotification()
+                audio?.soundEnabled = MetronomeRuntime.soundEnabled
+                refreshAudible()
             }
             STOP -> session?.let {
-                handler.removeCallbacks(tick)
+                handler.removeCallbacks(heartbeat)
+                audio?.stop(); audio = null
                 if (wakeLock.isHeld) wakeLock.release()
                 val duration = it.stop(now)
                 store.finish(System.currentTimeMillis(), duration, it.changes)
@@ -136,32 +132,42 @@ class MetronomeService : Service() {
         return START_NOT_STICKY
     }
 
-    private val tick = object : Runnable {
+    private fun startAudio(bpm: Int) {
+        audio = runCatching {
+            StreamingMetronome(this, bpm).also {
+                it.volume = MetronomeRuntime.volume
+                it.soundEnabled = MetronomeRuntime.soundEnabled
+                it.callMuted = callActive()
+                it.start()
+            }
+        }.onFailure { Log.e("DayDayUpAudio", "Unable to start PCM stream", it) }.getOrNull()
+        refreshAudible()
+    }
+
+    private fun callActive(): Boolean {
+        val mode = (getSystemService(AUDIO_SERVICE) as AudioManager).mode
+        return mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION
+    }
+
+    private fun refreshAudible() {
+        val audible = audio != null && !callActive() && MetronomeRuntime.soundEnabled && MetronomeRuntime.volume > 0f
+        if (MetronomeRuntime.audible != audible) {
+            MetronomeRuntime.audible = audible
+            updateNotification()
+        }
+    }
+
+    private val heartbeat = object : Runnable {
         override fun run() {
             synchronized(stateLock) {
             val current = session ?: return
             if (current.paused) return
-            val tickNs = SystemClock.elapsedRealtimeNanos()
-            if (tickNs < nextBeatNs) {
-                handler.postDelayed(this, ((nextBeatNs - tickNs) / 1_000_000L).coerceAtLeast(1L))
-                return
-            }
             val now = SystemClock.elapsedRealtime()
-            val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-            val callActive = audioManager.mode == AudioManager.MODE_IN_CALL || audioManager.mode == AudioManager.MODE_IN_COMMUNICATION
-            val wasAudible = MetronomeRuntime.audible
-            MetronomeRuntime.audible = !callActive && MetronomeRuntime.soundEnabled && MetronomeRuntime.volume > 0f
-            if (wasAudible != MetronomeRuntime.audible) updateNotification()
-            if (MetronomeRuntime.audible && pool.play(clickId, MetronomeRuntime.volume, MetronomeRuntime.volume, 1, 0, 1f) == 0) {
-                MetronomeRuntime.audible = false
-                updateNotification()
-            }
+            audio?.callMuted = callActive()
+            refreshAudible()
             MetronomeRuntime.elapsedMs = current.elapsedMs(now)
             if (now - lastCheckpointMs >= 5_000L) checkpoint(now)
-            val intervalNs = 60_000_000_000L / current.bpm
-            nextBeatNs += intervalNs
-            if (nextBeatNs < tickNs) nextBeatNs = tickNs + intervalNs
-            handler.postDelayed(this, ((nextBeatNs - SystemClock.elapsedRealtimeNanos()) / 1_000_000L).coerceAtLeast(1L))
+            handler.postDelayed(this, 250L)
             }
         }
     }
@@ -199,8 +205,8 @@ class MetronomeService : Service() {
             if (wakeLock.isHeld) wakeLock.release()
         }
         handler.removeCallbacksAndMessages(null)
+        audio?.stop(); audio = null
         thread.quitSafely()
-        pool.release()
         super.onDestroy()
     }
 }

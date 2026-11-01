@@ -22,9 +22,9 @@ class DemoStateTest {
         val state = DemoState()
         val before = state.exercises.first().sets.first().kg
         state.coachSuggestion = true
-        assertEquals(before, state.exercises.first().sets.first().kg)
-        state.updateSet(0, 0, 10, before - 2)
-        assertEquals(before - 2, state.exercises.first().sets.first().kg)
+        assertEquals(before, state.exercises.first().sets.first().kg, 0.001)
+        state.updateSet(0, 0, 10, before - 2.0)
+        assertEquals(before - 2.0, state.exercises.first().sets.first().kg, 0.001)
     }
 
     @Test fun copyingTemplateKeepsOriginalIndependent() {

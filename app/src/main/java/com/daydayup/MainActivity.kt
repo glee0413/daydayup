@@ -41,11 +41,15 @@ val Muted = Color(0xFF60747A)
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: SessionStore
+    private lateinit var planning: PlanningStore
     private var notificationsGranted by mutableStateOf(true)
     private val export = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let { contentResolver.openOutputStream(it)?.use { output -> output.write(store.exportJson().toByteArray(Charsets.UTF_8)) } }
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { notificationsGranted = it }
+    private val exportPlanning = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let { contentResolver.openOutputStream(it)?.use { output -> output.write(planning.exportJson().toByteArray(Charsets.UTF_8)) } }
+    }
 
     override fun onResume() {
         super.onResume()
@@ -56,7 +60,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = SessionStore(this)
+        planning = PlanningStore(this)
         val audioSettings = getSharedPreferences("metronome_audio", MODE_PRIVATE)
+        MetronomeRuntime.bpm = audioSettings.getInt("default_bpm", 180).coerceIn(Cadence.MIN, Cadence.MAX)
         MetronomeRuntime.volume = audioSettings.getFloat("click_volume", 1f).coerceIn(0f, 1f)
         MetronomeRuntime.soundEnabled = audioSettings.getBoolean("click_enabled", true)
         if (MetronomeRuntime.phase == "idle") store.recoverInterrupted()
@@ -65,6 +71,14 @@ class MainActivity : ComponentActivity() {
             val demo = remember { DemoState() }
             var records by remember { mutableStateOf(store.records()) }
             val phase = MetronomeRuntime.phase
+            var hadActiveRun by remember { mutableStateOf(false) }
+            LaunchedEffect(phase) {
+                if (phase != "idle") hadActiveRun = true
+                else if (hadActiveRun) {
+                    MetronomeRuntime.bpm = audioSettings.getInt("default_bpm", 180).coerceIn(Cadence.MIN, Cadence.MAX)
+                    hadActiveRun = false
+                }
+            }
             LaunchedEffect(phase, page) { if (phase == "idle" || page == "记录") records = store.records() }
             MaterialTheme(colorScheme = lightColorScheme(primary = Teal, background = Paper, surface = Color.White)) {
                 Column(Modifier.fillMaxSize().background(Paper)) {
@@ -83,26 +97,50 @@ class MainActivity : ComponentActivity() {
                                     ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                                     MetronomeService.send(this@MainActivity, action, bpm)
                                 },
-                                sendVolume = { value ->
-                                    audioSettings.edit().putFloat("click_volume", value).apply()
-                                    if (MetronomeRuntime.phase != "idle") startService(Intent(this@MainActivity, MetronomeService::class.java)
-                                        .setAction(MetronomeService.SET_VOLUME).putExtra(MetronomeService.EXTRA_VOLUME, value))
-                                },
-                                sendSound = { value ->
-                                    audioSettings.edit().putBoolean("click_enabled", value).apply()
-                                    if (MetronomeRuntime.phase != "idle") startService(Intent(this@MainActivity, MetronomeService::class.java)
-                                        .setAction(MetronomeService.SET_SOUND).putExtra(MetronomeService.EXTRA_SOUND, value))
-                                },
+                                openSettings = { page = "节拍设置" },
                                 openRecords = { page = "记录" },
                                 demoActive = demo.phase !in listOf("notStarted", "done"),
                                 endDemo = { demo.phase = "done" },
                                 notificationsGranted = notificationsGranted,
                                 openNotificationSettings = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                     Uri.parse("package:$packageName"))) })
+                            "节拍设置" -> MetronomeSettingsScreen(
+                                setBpm = { bpm ->
+                                    audioSettings.edit().putInt("default_bpm", bpm).apply()
+                                    if (MetronomeRuntime.phase == "idle") MetronomeRuntime.bpm = bpm
+                                    else MetronomeService.send(this@MainActivity, MetronomeService.SET_BPM, bpm)
+                                },
+                                setVolume = { value ->
+                                    audioSettings.edit().putFloat("click_volume", value).apply()
+                                    MetronomeRuntime.volume = value
+                                    if (MetronomeRuntime.phase != "idle") startService(Intent(this@MainActivity, MetronomeService::class.java)
+                                        .setAction(MetronomeService.SET_VOLUME).putExtra(MetronomeService.EXTRA_VOLUME, value))
+                                },
+                                setSound = { value ->
+                                    audioSettings.edit().putBoolean("click_enabled", value).apply()
+                                    MetronomeRuntime.soundEnabled = value
+                                    if (MetronomeRuntime.phase != "idle") startService(Intent(this@MainActivity, MetronomeService::class.java)
+                                        .setAction(MetronomeService.SET_SOUND).putExtra(MetronomeService.EXTRA_SOUND, value))
+                                }, back = { page = "节拍器" })
                             "记录" -> HistoryScreen(records, { page = "节拍器" }, { id -> store.delete(id); records = store.records() },
                                 { id, name -> store.rename(id, name); records = store.records() }, { export.launch("daydayup-records.json") })
-                            "课程", "训练", "教练", "报告", "设备" -> DemoScreens(page, demo, { page = it }, phase != "idle", { page = "节拍器" })
-                            "我的" -> SettingsScreen({ page = "记录" }, { page = "设备" }, { export.launch("daydayup-records.json") }, { demo.reset() })
+                            "课程" -> CourseCalendar(planning, { page = "课表设置" }, { bpm ->
+                                if (MetronomeRuntime.phase == "idle") MetronomeRuntime.bpm = bpm
+                                page = "节拍器"
+                            }, { course ->
+                                demo.templates = listOf(DemoTemplate(course.name, "周一", course.exercises.map { ex ->
+                                    DemoExercise(ex.name, ex.sets.map { set -> DemoSet(set.reps, set.kg) }) }))
+                                demo.selectedTemplateIndex = 0
+                                demo.upSeconds = course.upSeconds; demo.downSeconds = course.downSeconds
+                                demo.setRestSeconds = course.setRestSeconds; demo.exerciseRestSeconds = course.exerciseRestSeconds
+                                demo.start(); page = "训练"
+                            }, phase != "idle")
+                            "课表设置" -> CourseSettings(planning) { page = "课程" }
+                            "个人资料" -> PersonalProfileScreen(planning) { page = "我的" }
+                            "训练", "教练", "报告", "设备" -> DemoScreens(page, demo, { page = it }, phase != "idle", { page = "节拍器" })
+                            "我的" -> SettingsScreen({ page = "记录" }, { page = "设备" }, { page = "个人资料" },
+                                { export.launch("daydayup-records.json") }, { exportPlanning.launch("daydayup-planning.json") },
+                                { planning.clear() }, { demo.reset() })
                         }
                     }
                     Row(Modifier.fillMaxWidth().background(Color.White).padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -154,7 +192,7 @@ fun HomeScreen(records: List<SessionRecord>, openMetronome: () -> Unit, openCour
         SectionCard(Modifier.background(Ink, RoundedCornerShape(20.dp))) {
             Text("跑步节拍器", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Ink)
             Text("一声一步 · 后台持续 · 与音乐同听", color = Muted)
-            ActionButton("开始设置节拍", openMetronome, Modifier.fillMaxWidth())
+            ActionButton("进入跑步控制", openMetronome, Modifier.fillMaxWidth())
         }
         SectionCard {
             Text("最近使用", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
@@ -170,17 +208,19 @@ fun HomeScreen(records: List<SessionRecord>, openMetronome: () -> Unit, openCour
 }
 
 @Composable
-fun MetronomeScreen(send: (String, Int?) -> Unit, sendVolume: (Float) -> Unit, sendSound: (Boolean) -> Unit,
+fun MetronomeScreen(send: (String, Int?) -> Unit, openSettings: () -> Unit,
                     openRecords: () -> Unit, demoActive: Boolean, endDemo: () -> Unit,
                     notificationsGranted: Boolean, openNotificationSettings: () -> Unit) {
     val phase = MetronomeRuntime.phase
     val bpm = MetronomeRuntime.bpm
-    var input by remember(bpm) { mutableStateOf(bpm.toString()) }
-    var error by remember { mutableStateOf("") }
     val running = phase != "idle"
     ScreenColumn {
-        Text("跑步节拍器", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Ink)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("跑步控制", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Ink)
+            TextButton(onClick = openSettings) { Text("节拍器设置") }
+        }
         Text(if (phase == "running") "节拍进行中 · 一声一步" else if (phase == "paused") "已暂停，时长不增加" else "手动开始，随时结束", color = Muted)
+        Text("当前仅提供节拍提示与计时，尚未读取真实跑步距离或手表心率。", color = Muted, fontSize = 12.sp)
         if (!notificationsGranted) SectionCard {
             Text("通知未授权", fontWeight = FontWeight.Bold, color = Ink)
             Text("锁屏时可能看不到暂停和结束操作。请在系统设置中允许通知。", color = Muted)
@@ -196,39 +236,50 @@ fun MetronomeScreen(send: (String, Int?) -> Unit, sendVolume: (Float) -> Unit, s
             Text("$bpm", fontSize = 76.sp, fontWeight = FontWeight.Bold, color = Ink,
                 modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
             Text("步 / 分钟", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Muted)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = { val value = (bpm - 5).coerceAtLeast(Cadence.MIN); if (running) send(MetronomeService.SET_BPM, value) else MetronomeRuntime.bpm = value }) { Text("− 5") }
-                OutlinedTextField(input, onValueChange = { input = it; error = "" }, label = { Text("输入步频") }, singleLine = true, modifier = Modifier.width(132.dp))
-                OutlinedButton(onClick = { val value = (bpm + 5).coerceAtMost(Cadence.MAX); if (running) send(MetronomeService.SET_BPM, value) else MetronomeRuntime.bpm = value }) { Text("+ 5") }
-            }
-            if (error.isNotEmpty()) Text(error, color = Color(0xFFC94B45), fontSize = 12.sp)
-            TextButton(onClick = {
-                val value = input.toIntOrNull()
-                if (value == null || !Cadence.isValid(value)) error = "请输入 160–220 之间的整数"
-                else if (running) send(MetronomeService.SET_BPM, value) else MetronomeRuntime.bpm = value
-            }) { Text("应用输入的步频") }
         }
         SectionCard {
             Text("本次时长", color = Muted)
             Text(formatDuration(MetronomeRuntime.elapsedMs), fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Ink)
             if (phase == "running" && !MetronomeRuntime.audible) Text("计时继续，当前无提示音", color = Color(0xFFC94B45))
             when (phase) {
-                "idle" -> if (!demoActive) ActionButton("开始节拍", { send(MetronomeService.START, bpm) }, Modifier.fillMaxWidth())
+                "idle" -> if (!demoActive) ActionButton("开始跑步", { send(MetronomeService.START, bpm) }, Modifier.fillMaxWidth())
                 "paused" -> ActionButton("继续", { send(MetronomeService.RESUME, null) }, Modifier.fillMaxWidth())
                 else -> ActionButton("暂停", { send(MetronomeService.PAUSE, null) }, Modifier.fillMaxWidth(), secondary = true)
             }
             if (running) OutlinedButton(onClick = { send(MetronomeService.STOP, null) }, Modifier.fillMaxWidth()) { Text("结束并保存") }
         }
+        SectionCard { Text("提示音：${if (MetronomeRuntime.soundEnabled) "开启" else "关闭"} · 音量 ${Math.round(MetronomeRuntime.volume * 100)}%", color = Muted) }
+        TextButton(onClick = openRecords) { Text("查看真实使用记录 →") }
+    }
+}
+
+@Composable
+fun MetronomeSettingsScreen(setBpm: (Int) -> Unit, setVolume: (Float) -> Unit, setSound: (Boolean) -> Unit, back: () -> Unit) {
+    val bpm = MetronomeRuntime.bpm
+    var input by remember(bpm) { mutableStateOf(bpm.toString()) }
+    var error by remember { mutableStateOf("") }
+    ScreenColumn {
+        TextButton(onClick = back) { Text("← 返回跑步控制") }
+        Text("节拍器设置", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("运行中修改会立即生效，且不重启计时。", color = Muted)
         SectionCard {
-            Text("提示音", fontWeight = FontWeight.SemiBold, color = Ink)
+            Text("步频 · $bpm 步/分钟", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                OutlinedButton(onClick = { setBpm((bpm - 5).coerceAtLeast(Cadence.MIN)) }) { Text("−5") }
+                OutlinedTextField(input, onValueChange = { input = it; error = "" }, label = { Text("输入步频") }, singleLine = true, modifier = Modifier.width(130.dp))
+                OutlinedButton(onClick = { setBpm((bpm + 5).coerceAtMost(Cadence.MAX)) }) { Text("+5") }
+            }
+            if (error.isNotEmpty()) Text(error, color = Color(0xFFC94B45))
+            TextButton(onClick = { val value = input.toIntOrNull(); if (value == null || !Cadence.isValid(value)) error = "请输入 160–220 之间的整数" else setBpm(value) }) { Text("应用步频") }
+        }
+        SectionCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("播放提示音", Modifier.weight(1f)); Switch(MetronomeRuntime.soundEnabled, onCheckedChange = { MetronomeRuntime.soundEnabled = it; sendSound(it) })
+                Text("播放提示音", Modifier.weight(1f)); Switch(MetronomeRuntime.soundEnabled, onCheckedChange = setSound)
             }
             Text("节拍音量 ${Math.round(MetronomeRuntime.volume * 100)}%", color = Muted)
-            Slider(MetronomeRuntime.volume, onValueChange = { MetronomeRuntime.volume = it; sendVolume(it) })
-            Text("此滑杆只调节节拍声；手机媒体音量仍决定声音上限。第一版不含语音播报。", color = Muted, fontSize = 12.sp)
+            Slider(MetronomeRuntime.volume, onValueChange = setVolume)
+            Text("手机媒体音量仍决定声音上限。", color = Muted, fontSize = 12.sp)
         }
-        TextButton(onClick = openRecords) { Text("查看真实使用记录 →") }
     }
 }
 
@@ -262,14 +313,23 @@ fun HistoryScreen(records: List<SessionRecord>, back: () -> Unit, delete: (Long)
 }
 
 @Composable
-fun SettingsScreen(openRecords: () -> Unit, openDevice: () -> Unit, export: () -> Unit, resetDemo: () -> Unit) {
+fun SettingsScreen(openRecords: () -> Unit, openDevice: () -> Unit, openProfile: () -> Unit,
+                   export: () -> Unit, exportPlanning: () -> Unit, clearPlanning: () -> Unit, resetDemo: () -> Unit) {
+    var confirmClear by remember { mutableStateOf(false) }
     ScreenColumn {
         Text("我的", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Ink)
+        SectionCard {
+            Text("个人资料", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("身体信息、体重与体能测试记录保存在本机。", color = Muted)
+            TextButton(onClick = openProfile) { Text("查看与编辑个人资料 →") }
+        }
         SectionCard {
             Text("数据与隐私", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Text("真实节拍器记录保存在本机。你可以查看、导出或删除。", color = Muted)
             TextButton(onClick = openRecords) { Text("查看真实记录") }
             TextButton(onClick = export) { Text("导出记录") }
+            TextButton(onClick = exportPlanning) { Text("导出课程与个人资料") }
+            TextButton(onClick = { confirmClear = true }) { Text("清除课程与个人资料") }
         }
         SectionCard {
             Text("即将推出", fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -278,6 +338,10 @@ fun SettingsScreen(openRecords: () -> Unit, openDevice: () -> Unit, export: () -
             TextButton(onClick = resetDemo) { Text("重置演示数据") }
         }
     }
+    if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text("清除本地计划与资料？") },
+        text = { Text("课程安排、身体信息、体重和体测历史将被删除；真实节拍记录仍保留。") },
+        confirmButton = { TextButton(onClick = { clearPlanning(); confirmClear = false }) { Text("确认清除") } },
+        dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } })
 }
 
 fun formatDuration(ms: Long): String {

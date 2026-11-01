@@ -10,13 +10,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-data class DemoSet(val reps: Int = 10, val kg: Int = 10)
+data class DemoSet(val reps: Int = 10, val kg: Double = 10.0)
 data class DemoExercise(val name: String, val sets: List<DemoSet> = List(3) { DemoSet() })
-data class DemoResult(val exercise: String, val reps: Int, val kg: Int, val difficulty: Int, val skipped: Boolean)
+data class DemoResult(val exercise: String, val reps: Int, val kg: Double, val difficulty: Int, val skipped: Boolean)
 data class DemoTemplate(val name: String, val day: String, val exercises: List<DemoExercise>)
 
 private fun defaultTemplate() = DemoTemplate("上肢力量 A", "周一",
-    listOf(DemoExercise("二头弯举"), DemoExercise("三头肌伸展", List(3) { DemoSet(10, 8) })))
+    listOf(DemoExercise("二头弯举"), DemoExercise("三头肌伸展", List(3) { DemoSet(10, 8.0) })))
 
 class DemoState {
     var templates by mutableStateOf(listOf(defaultTemplate()))
@@ -39,7 +39,7 @@ class DemoState {
     var completed by mutableIntStateOf(0)
     var skipped by mutableIntStateOf(0)
     var actualReps by mutableIntStateOf(10)
-    var actualKg by mutableIntStateOf(10)
+    var actualKg by mutableDoubleStateOf(10.0)
     var difficulty by mutableIntStateOf(3)
     var results by mutableStateOf(emptyList<DemoResult>())
     var coachSuggestion by mutableStateOf(false)
@@ -69,10 +69,10 @@ class DemoState {
     }
 
     fun addExercise(name: String) { if (name.isNotBlank()) exercises = exercises + DemoExercise(name.trim()) }
-    fun updateSet(exercise: Int, set: Int, reps: Int, kg: Int) {
+    fun updateSet(exercise: Int, set: Int, reps: Int, kg: Double) {
         if (exercise !in exercises.indices || set !in exercises[exercise].sets.indices) return
         exercises = exercises.toMutableList().also { list ->
-            list[exercise] = list[exercise].copy(sets = list[exercise].sets.toMutableList().also { it[set] = DemoSet(reps.coerceAtLeast(1), kg.coerceAtLeast(0)) })
+            list[exercise] = list[exercise].copy(sets = list[exercise].sets.toMutableList().also { it[set] = DemoSet(reps.coerceAtLeast(1), kg.coerceAtLeast(0.0)) })
         }
     }
     fun addSet(exercise: Int) {
@@ -90,7 +90,7 @@ class DemoState {
     fun result(kind: String) {
         val exercise = workoutExercises[exerciseIndex]
         results = results + DemoResult(exercise.name, if (kind == "跳过") 0 else actualReps,
-            if (kind == "跳过") 0 else actualKg, difficulty, kind == "跳过")
+            if (kind == "跳过") 0.0 else actualKg, difficulty, kind == "跳过")
         if (kind == "跳过") skipped++ else completed++
         advance()
     }
@@ -171,9 +171,9 @@ fun CourseDemo(state: DemoState, navigate: (String) -> Unit, realMetronomeActive
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("重量", Modifier.width(64.dp), color = Muted)
-                        TextButton(onClick = { state.updateSet(index, setIndex, set.reps, set.kg - 1) }) { Text("−") }
+                        TextButton(onClick = { state.updateSet(index, setIndex, set.reps, set.kg - 0.5) }) { Text("−") }
                         Text("${set.kg} 公斤", Modifier.width(65.dp))
-                        TextButton(onClick = { state.updateSet(index, setIndex, set.reps, set.kg + 1) }) { Text("+") }
+                        TextButton(onClick = { state.updateSet(index, setIndex, set.reps, set.kg + 0.5) }) { Text("+") }
                     }
                 }
                 TextButton(onClick = { state.addSet(index) }) { Text("＋ 添加一组") }
@@ -245,7 +245,9 @@ fun WorkoutDemo(state: DemoState, navigate: (String) -> Unit) {
                 if (state.phase == "rest" && state.seconds <= 3) Text("准备进入下一组", color = Amber)
                 if (state.phase == "confirm") {
                     DemoNumberControl("实际次数", state.actualReps, { state.actualReps = it.coerceAtLeast(0) }, 1)
-                    DemoNumberControl("实际重量（公斤）", state.actualKg, { state.actualKg = it.coerceAtLeast(0) }, 1)
+                    Row { Text("实际重量 ${state.actualKg} 公斤", Modifier.weight(1f));
+                        TextButton(onClick = { state.actualKg = (state.actualKg - 0.5).coerceAtLeast(0.0) }) { Text("−") }
+                        TextButton(onClick = { state.actualKg += 0.5 }) { Text("+") } }
                     DemoNumberControl("主观难度（1–5）", state.difficulty, { state.difficulty = it.coerceIn(1, 5) }, 1)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = { state.result("完成") }) { Text("完成") }
@@ -290,7 +292,7 @@ fun CoachDemo(state: DemoState, navigate: (String) -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     state.workoutExercises = state.workoutExercises.mapIndexed { index, exercise ->
-                        if (index == 0) exercise.copy(sets = exercise.sets.map { it.copy(kg = (it.kg - 2).coerceAtLeast(0)) }) else exercise
+                        if (index == 0) exercise.copy(sets = exercise.sets.map { it.copy(kg = (it.kg - 2.0).coerceAtLeast(0.0)) }) else exercise
                     }
                     state.coachSuggestion = false
                 }) { Text("确认修改") }
